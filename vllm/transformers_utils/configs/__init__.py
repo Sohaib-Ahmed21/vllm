@@ -65,6 +65,10 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "KimiVLConfig": "vllm.transformers_utils.configs.kimi_vl",
     "KimiK25Config": "vllm.transformers_utils.configs.kimi_k25",
     "NemotronConfig": "vllm.transformers_utils.configs.nemotron",
+    "Nemotron3_5AsrConfig": "vllm.transformers_utils.configs.nemotron3_5_asr",
+    "NemotronAsrStreamingEncoderConfig": (
+        "vllm.transformers_utils.configs.nemotron3_5_asr"
+    ),
     "NemotronHConfig": "vllm.transformers_utils.configs.nemotron_h",
     "OlmoHybridConfig": "vllm.transformers_utils.configs.olmo_hybrid",
     "OpenVLAConfig": "vllm.transformers_utils.configs.openvla",
@@ -139,6 +143,8 @@ __all__ = [
     "KimiVLConfig",
     "KimiK25Config",
     "NemotronConfig",
+    "Nemotron3_5AsrConfig",
+    "NemotronAsrStreamingEncoderConfig",
     "NemotronHConfig",
     "OlmoHybridConfig",
     "OpenVLAConfig",

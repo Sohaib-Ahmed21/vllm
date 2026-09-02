@@ -14,6 +14,9 @@ from vllm.model_executor.models.nemotron3_5_asr import (
     Nemotron3_5AsrProcessingInfo,
 )
 from vllm.multimodal.inputs import MultiModalSharedField
+from vllm.transformers_utils.processors.nemotron3_5_asr import (
+    NemotronAsrStreamingFeatureExtractor,
+)
 
 
 class _Tokenizer:
@@ -73,6 +76,7 @@ class _ProcessingContext:
         )
         self.model_config = SimpleNamespace(
             model="nvidia/nemotron-3.5-asr-streaming-0.6b",
+            revision=None,
             max_model_len=4096,
             encoder_config={},
             hf_config=SimpleNamespace(
@@ -87,7 +91,9 @@ class _ProcessingContext:
     def get_tokenizer(self):
         return self.tokenizer
 
-    def get_hf_config(self):
+    def get_hf_config(self, typ=None):
+        if typ is not None:
+            assert isinstance(self.model_config.hf_config, typ)
         return self.model_config.hf_config
 
     def get_hf_processor(self, **kwargs):
@@ -107,7 +113,14 @@ class _ProcessingContext:
 
 
 def _build_processor(valid_mel_frames: int):
-    info = Nemotron3_5AsrProcessingInfo(_ProcessingContext(valid_mel_frames))
+    class _TestProcessingInfo(Nemotron3_5AsrProcessingInfo):
+        def get_hf_config(self):
+            return self.ctx.get_hf_config()
+
+        def get_hf_processor(self, **kwargs):
+            return self.ctx.get_hf_processor(**kwargs)
+
+    info = _TestProcessingInfo(_ProcessingContext(valid_mel_frames))
     return Nemotron3_5AsrMultiModalProcessor(
         info,
         Nemotron3_5AsrDummyInputsBuilder(info),
@@ -153,7 +166,7 @@ def test_nemotron_processor_builds_encoder_decoder_contract(
 
 
 def test_nemotron_dummy_audio_fills_encoder_capacity() -> None:
-    info = Nemotron3_5AsrProcessingInfo(_ProcessingContext(valid_mel_frames=25))
+    info = _build_processor(valid_mel_frames=25).info
     builder = Nemotron3_5AsrDummyInputsBuilder(info)
 
     mm_data = builder.get_dummy_mm_data(
@@ -164,5 +177,33 @@ def test_nemotron_dummy_audio_fills_encoder_capacity() -> None:
 
     (audio,) = mm_data["audio"]
     hop_length = info.get_feature_extractor().hop_length
-    assert len(audio) // hop_length == 25
-    assert (len(audio) + 1) // hop_length == 26
+    assert len(audio) // hop_length == 24
+    assert (len(audio) + 1) // hop_length == 25
+
+
+def test_nemotron_offline_feature_extractor_masks_extra_stft_frame() -> None:
+    pytest.importorskip("librosa")
+    feature_extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
+
+    output = feature_extractor(
+        np.zeros(4040, dtype=np.float32),
+        sampling_rate=16000,
+        return_tensors="pt",
+    )
+
+    assert output["input_features"].shape == (1, 26, 128)
+    assert output["attention_mask"].shape == (1, 26)
+    assert output["attention_mask"].sum().item() == 25
+    assert not output["attention_mask"][0, -1]
+    assert torch.count_nonzero(output["input_features"][0, -1]).item() == 0
+
+
+def test_nemotron_feature_extractor_rejects_wrong_sampling_rate() -> None:
+    pytest.importorskip("librosa")
+    feature_extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
+
+    with pytest.raises(ValueError, match="Expected sampling rate 16000"):
+        feature_extractor(
+            np.zeros(1600, dtype=np.float32),
+            sampling_rate=8000,
+        )
