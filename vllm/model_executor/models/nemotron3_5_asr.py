@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Multimodal input processing for NVIDIA Nemotron 3.5 ASR."""
+"""Offline input processing and encoder for NVIDIA Nemotron 3.5 ASR."""
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import Any
 
 import torch
 from torch import nn
@@ -13,6 +12,7 @@ from transformers import BatchFeature
 
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
@@ -103,9 +103,7 @@ class Nemotron3_5AsrProcessingInfo(BaseProcessingInfo):
             feature_config = dict(processor_config.pop("feature_extractor"))
             feature_config.pop("feature_extractor_type", None)
             processor_config.pop("processor_class", None)
-            feature_extractor = NemotronAsrStreamingFeatureExtractor(
-                **feature_config
-            )
+            feature_extractor = NemotronAsrStreamingFeatureExtractor(**feature_config)
             self._cached_hf_processor = Nemotron3_5AsrProcessor(
                 feature_extractor,
                 self.get_tokenizer(),
@@ -123,7 +121,9 @@ class Nemotron3_5AsrProcessingInfo(BaseProcessingInfo):
             target_channels=1,
         )
 
-    def get_feature_extractor(self, **kwargs: object) -> Any:
+    def get_feature_extractor(
+        self, **kwargs: object
+    ) -> NemotronAsrStreamingFeatureExtractor:
         processor = self.get_hf_processor(**kwargs)
         return processor.feature_extractor
 
@@ -356,8 +356,7 @@ class NemotronAsrStreamingSubsamplingConv2d(nn.Module):
             stride=config.subsampling_conv_stride,
         )
         self.layers = nn.ModuleList(
-            NemotronAsrStreamingSubsamplingLayer(config)
-            for _ in range(1, num_layers)
+            NemotronAsrStreamingSubsamplingLayer(config) for _ in range(1, num_layers)
         )
         self.act_fn = nn.ReLU()
         self.linear = nn.Linear(
@@ -425,8 +424,10 @@ class NemotronAsrStreamingRelativePositionEncoding(nn.Module):
             (frequencies.sin(), frequencies.cos()),
             dim=-1,
         ).flatten(-2)
-        return embeddings[None].expand(hidden_states.shape[0], -1, -1).to(
-            hidden_states.dtype
+        return (
+            embeddings[None]
+            .expand(hidden_states.shape[0], -1, -1)
+            .to(hidden_states.dtype)
         )
 
 
@@ -470,9 +471,7 @@ class NemotronAsrStreamingAttention(nn.Module):
 
     @staticmethod
     def _relative_shift(attention_scores: torch.Tensor) -> torch.Tensor:
-        batch_size, num_heads, query_length, position_length = (
-            attention_scores.shape
-        )
+        batch_size, num_heads, query_length, position_length = attention_scores.shape
         attention_scores = F.pad(attention_scores, (1, 0))
         attention_scores = attention_scores.view(
             batch_size,
@@ -540,10 +539,11 @@ class NemotronAsrStreamingFeedForward(nn.Module):
             config.hidden_size,
             bias=config.attention_bias,
         )
+        self.activation = get_act_fn(config.hidden_act)
         self.activation_dropout = config.activation_dropout
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = F.silu(self.linear1(hidden_states))
+        hidden_states = self.activation(self.linear1(hidden_states))
         hidden_states = F.dropout(
             hidden_states,
             p=self.activation_dropout,
@@ -576,6 +576,7 @@ class NemotronAsrStreamingConvolutionModule(nn.Module):
             kernel_size=1,
             bias=config.convolution_bias,
         )
+        self.activation = get_act_fn(config.hidden_act)
 
     def forward(
         self,
@@ -590,7 +591,7 @@ class NemotronAsrStreamingConvolutionModule(nn.Module):
             hidden_states.masked_fill_(padding_mask[:, None, :], 0.0)
         hidden_states = self.depthwise_conv(hidden_states).transpose(1, 2)
         hidden_states = self.norm(hidden_states).transpose(1, 2)
-        hidden_states = F.silu(hidden_states)
+        hidden_states = self.activation(hidden_states)
         return self.pointwise_conv2(hidden_states).transpose(1, 2)
 
 
@@ -615,9 +616,7 @@ class NemotronAsrStreamingEncoderBlock(nn.Module):
         position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
         residual = hidden_states
-        hidden_states = self.feed_forward1(
-            self.norm_feed_forward1(hidden_states)
-        )
+        hidden_states = self.feed_forward1(self.norm_feed_forward1(hidden_states))
         hidden_states = residual + 0.5 * hidden_states
         hidden_states = hidden_states + self.self_attn(
             self.norm_self_att(hidden_states),
@@ -656,9 +655,7 @@ class NemotronAsrStreamingEncoder(nn.Module):
         output_lengths = _get_subsampling_output_lengths(
             attention_mask.sum(-1),
             subsampling_factor=self.config.subsampling_factor,
-            subsampling_conv_kernel_size=(
-                self.config.subsampling_conv_kernel_size
-            ),
+            subsampling_conv_kernel_size=(self.config.subsampling_conv_kernel_size),
             subsampling_conv_stride=self.config.subsampling_conv_stride,
         )
         positions = torch.arange(target_length, device=attention_mask.device)
@@ -676,9 +673,7 @@ class NemotronAsrStreamingEncoder(nn.Module):
         positions = torch.arange(seq_length, device=device)
         chunks = torch.div(positions, chunk_size, rounding_mode="floor")
         chunk_difference = chunks[:, None] - chunks[None, :]
-        chunk_mask = (chunk_difference >= 0) & (
-            chunk_difference <= left_context_chunks
-        )
+        chunk_mask = (chunk_difference >= 0) & (chunk_difference <= left_context_chunks)
         attention_mask = chunk_mask[None, None]
         if output_mask is not None:
             attention_mask = attention_mask & output_mask[:, None, None, :]

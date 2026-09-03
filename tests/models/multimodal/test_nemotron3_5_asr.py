@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from vllm.model_executor.models.nemotron3_5_asr import (
@@ -61,6 +62,25 @@ def test_nemotron_config_builds_nested_encoder_config() -> None:
     assert config.encoder_config.subsampling_out_hidden_size == 8
     assert config.is_encoder_decoder
     assert _CONFIG_REGISTRY["nemotron3_5_asr"] is Nemotron3_5AsrConfig
+
+
+def test_nemotron_config_rejects_grouped_query_attention() -> None:
+    with pytest.raises(ValueError, match="num_key_value_heads to equal"):
+        NemotronAsrStreamingEncoderConfig(
+            num_attention_heads=4,
+            num_key_value_heads=2,
+        )
+
+
+def test_nemotron_audio_encoder_uses_configured_activation() -> None:
+    config = _get_tiny_config()
+    config.encoder_config.hidden_act = "relu"
+
+    model = Nemotron3_5AsrAudioEncoder(config)
+    layer = model.encoder.layers[0]
+
+    assert isinstance(layer.feed_forward1.activation, torch.nn.ReLU)
+    assert isinstance(layer.conv.activation, torch.nn.ReLU)
 
 
 def test_nemotron_audio_encoder_preserves_batch_and_valid_lengths() -> None:

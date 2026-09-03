@@ -9,7 +9,7 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 from transformers import BatchFeature
-from transformers.audio_utils import make_list_of_audio
+from transformers.audio_utils import make_list_of_audio, mel_filter_bank
 from transformers.feature_extraction_sequence_utils import SequenceFeatureExtractor
 from transformers.processing_utils import ProcessorMixin
 
@@ -168,22 +168,16 @@ class NemotronAsrStreamingFeatureExtractor(SequenceFeatureExtractor):
         self.win_length = win_length
         self.preemphasis = preemphasis
 
-        try:
-            import librosa
-        except ImportError as exc:
-            raise ImportError(
-                "NemotronAsrStreamingFeatureExtractor requires librosa."
-            ) from exc
-
-        mel_filters = librosa.filters.mel(
-            sr=sampling_rate,
-            n_fft=n_fft,
-            n_mels=feature_size,
-            fmin=0.0,
-            fmax=sampling_rate / 2,
+        mel_filters = mel_filter_bank(
+            num_frequency_bins=n_fft // 2 + 1,
+            num_mel_filters=feature_size,
+            min_frequency=0.0,
+            max_frequency=sampling_rate / 2,
+            sampling_rate=sampling_rate,
             norm="slaney",
+            mel_scale="slaney",
         )
-        self.mel_filters = torch.from_numpy(mel_filters).to(torch.float32)
+        self.mel_filters = torch.from_numpy(mel_filters.T).to(torch.float32)
 
     def _torch_extract_fbank_features(
         self,
@@ -245,10 +239,7 @@ class NemotronAsrStreamingFeatureExtractor(SequenceFeatureExtractor):
                 self.sampling_rate,
             )
 
-        if (
-            isinstance(raw_speech, (np.ndarray, torch.Tensor))
-            and raw_speech.ndim <= 1
-        ):
+        if isinstance(raw_speech, (np.ndarray, torch.Tensor)) and raw_speech.ndim <= 1:
             audios = [raw_speech]
         elif isinstance(raw_speech, (Sequence, np.ndarray, torch.Tensor)):
             audios = list(raw_speech)
@@ -339,9 +330,12 @@ class Nemotron3_5AsrProcessor(ProcessorMixin):
         del kwargs
         self.prompt_dictionary = prompt_dictionary or _DEFAULT_PROMPT_DICTIONARY
         self.num_prompts = num_prompts
-        self.supported_num_lookahead_tokens = (
-            supported_num_lookahead_tokens or [3, 0, 6, 13]
-        )
+        self.supported_num_lookahead_tokens = supported_num_lookahead_tokens or [
+            3,
+            0,
+            6,
+            13,
+        ]
         self.default_num_lookahead_tokens = (
             default_num_lookahead_tokens
             if default_num_lookahead_tokens is not None
@@ -380,6 +374,8 @@ class Nemotron3_5AsrProcessor(ProcessorMixin):
     ) -> BatchFeature:
         if audio is None:
             raise ValueError("Nemotron ASR requires audio input.")
+        if isinstance(audio, (list, tuple)) and audio and np.isscalar(audio[0]):
+            audio = np.asarray(audio, dtype=np.float32)
         audio_list = make_list_of_audio(audio)
         inputs = self.feature_extractor(
             audio_list,
@@ -416,6 +412,7 @@ class Nemotron3_5AsrProcessor(ProcessorMixin):
             "decoder_input_ids",
             "prompt_ids",
         ]
+
 
 __all__ = [
     "NemotronAsrStreamingFeatureExtractor",

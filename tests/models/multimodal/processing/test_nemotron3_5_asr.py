@@ -6,20 +6,26 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from transformers import BatchFeature
+from transformers import BatchFeature, PreTrainedTokenizerBase
 
 from vllm.model_executor.models.nemotron3_5_asr import (
     Nemotron3_5AsrDummyInputsBuilder,
     Nemotron3_5AsrMultiModalProcessor,
     Nemotron3_5AsrProcessingInfo,
+    _get_subsampling_output_lengths,
 )
 from vllm.multimodal.inputs import MultiModalSharedField
-from vllm.transformers_utils.processors.nemotron3_5_asr import (
+from vllm.transformers_utils.processors import (
+    Nemotron3_5AsrProcessor,
     NemotronAsrStreamingFeatureExtractor,
 )
 
 
-class _Tokenizer:
+class _Tokenizer(PreTrainedTokenizerBase):
+    def convert_tokens_to_ids(self, token):
+        assert token == "<blank>"
+        return 13087
+
     def encode(self, text, add_special_tokens=False):
         del add_special_tokens
         return [ord(char) for char in text]
@@ -176,13 +182,36 @@ def test_nemotron_dummy_audio_fills_encoder_capacity() -> None:
     )
 
     (audio,) = mm_data["audio"]
-    hop_length = info.get_feature_extractor().hop_length
+    feature_extractor_info = info.get_feature_extractor()
+    hop_length = feature_extractor_info.hop_length
     assert len(audio) // hop_length == 24
     assert (len(audio) + 1) // hop_length == 25
 
+    feature_extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
+    features = feature_extractor(
+        audio,
+        sampling_rate=feature_extractor_info.sampling_rate,
+        return_tensors="pt",
+    )
+    encoder_config = info.get_hf_config().encoder_config
+    physical_frames = _get_subsampling_output_lengths(
+        torch.tensor([features["input_features"].shape[1]]),
+        subsampling_factor=encoder_config.subsampling_factor,
+        subsampling_conv_kernel_size=(encoder_config.subsampling_conv_kernel_size),
+        subsampling_conv_stride=encoder_config.subsampling_conv_stride,
+    )
+    valid_frames = _get_subsampling_output_lengths(
+        features["attention_mask"].sum(-1),
+        subsampling_factor=encoder_config.subsampling_factor,
+        subsampling_conv_kernel_size=(encoder_config.subsampling_conv_kernel_size),
+        subsampling_conv_stride=encoder_config.subsampling_conv_stride,
+    )
+
+    assert physical_frames.item() == encoder_config.max_position_embeddings
+    assert valid_frames.item() == encoder_config.max_position_embeddings
+
 
 def test_nemotron_offline_feature_extractor_masks_extra_stft_frame() -> None:
-    pytest.importorskip("librosa")
     feature_extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
 
     output = feature_extractor(
@@ -198,12 +227,84 @@ def test_nemotron_offline_feature_extractor_masks_extra_stft_frame() -> None:
     assert torch.count_nonzero(output["input_features"][0, -1]).item() == 0
 
 
+def test_nemotron_mel_filters_match_librosa_reference() -> None:
+    librosa = pytest.importorskip("librosa")
+    feature_extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
+
+    expected = librosa.filters.mel(
+        sr=feature_extractor.sampling_rate,
+        n_fft=feature_extractor.n_fft,
+        n_mels=feature_extractor.feature_size,
+        fmin=0.0,
+        fmax=feature_extractor.sampling_rate / 2,
+        norm="slaney",
+    )
+
+    torch.testing.assert_close(
+        feature_extractor.mel_filters,
+        torch.from_numpy(expected),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+
+
 def test_nemotron_feature_extractor_rejects_wrong_sampling_rate() -> None:
-    pytest.importorskip("librosa")
     feature_extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
 
     with pytest.raises(ValueError, match="Expected sampling rate 16000"):
         feature_extractor(
             np.zeros(1600, dtype=np.float32),
             sampling_rate=8000,
+        )
+
+
+def test_nemotron_processor_builds_real_audio_batch() -> None:
+    processor = Nemotron3_5AsrProcessor(
+        NemotronAsrStreamingFeatureExtractor(feature_size=128),
+        _Tokenizer(),
+    )
+
+    output = processor(
+        audio=[
+            np.zeros(4040, dtype=np.float32),
+            np.zeros(1600, dtype=np.float32),
+        ],
+        sampling_rate=16000,
+        language=["en-US", "auto"],
+    )
+
+    assert output["input_features"].shape == (2, 26, 128)
+    assert output["attention_mask"].sum(-1).tolist() == [25, 10]
+    assert output["prompt_ids"].tolist() == [0, 101]
+    assert output["num_lookahead_tokens"] == 3
+    assert output["input_features"][1, 10:].count_nonzero().item() == 0
+
+
+def test_nemotron_processor_accepts_flat_audio_list() -> None:
+    processor = Nemotron3_5AsrProcessor(
+        NemotronAsrStreamingFeatureExtractor(feature_size=128),
+        _Tokenizer(),
+    )
+
+    output = processor(
+        audio=[0.0] * 1600,
+        sampling_rate=16000,
+    )
+
+    assert output["input_features"].shape == (1, 11, 128)
+    assert output["attention_mask"].sum().item() == 10
+    assert output["prompt_ids"].tolist() == [101]
+
+
+def test_nemotron_processor_rejects_unsupported_language() -> None:
+    processor = Nemotron3_5AsrProcessor(
+        NemotronAsrStreamingFeatureExtractor(feature_size=128),
+        _Tokenizer(),
+    )
+
+    with pytest.raises(ValueError, match="Unsupported Nemotron language"):
+        processor(
+            audio=np.zeros(1600, dtype=np.float32),
+            sampling_rate=16000,
+            language="not-a-language",
         )

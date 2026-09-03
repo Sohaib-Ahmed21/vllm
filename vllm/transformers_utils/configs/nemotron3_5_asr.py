@@ -45,10 +45,13 @@ class NemotronAsrStreamingEncoderConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.num_key_value_heads = (
-            num_attention_heads
-            if num_key_value_heads is None
-            else num_key_value_heads
+            num_attention_heads if num_key_value_heads is None else num_key_value_heads
         )
+        if self.num_key_value_heads != self.num_attention_heads:
+            raise ValueError(
+                "Nemotron ASR requires num_key_value_heads to equal "
+                "num_attention_heads."
+            )
         self.intermediate_size = intermediate_size
         self.hidden_act = hidden_act
         self.attention_bias = attention_bias
