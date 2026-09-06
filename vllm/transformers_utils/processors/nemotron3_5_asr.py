@@ -239,6 +239,12 @@ class NemotronAsrStreamingFeatureExtractor(SequenceFeatureExtractor):
                 self.sampling_rate,
             )
 
+        if (
+            isinstance(raw_speech, (list, tuple))
+            and raw_speech
+            and np.isscalar(raw_speech[0])
+        ):
+            raw_speech = np.asarray(raw_speech, dtype=np.float32)
         if isinstance(raw_speech, (np.ndarray, torch.Tensor)) and raw_speech.ndim <= 1:
             audios = [raw_speech]
         elif isinstance(raw_speech, (Sequence, np.ndarray, torch.Tensor)):
@@ -254,7 +260,7 @@ class NemotronAsrStreamingFeatureExtractor(SequenceFeatureExtractor):
         if isinstance(padding, str) and padding == "max_length":
             if max_length is None:
                 raise ValueError("max_length is required when padding='max_length'.")
-            target_length = max_length
+            target_length = max(target_length, max_length)
         elif padding is False or padding is None:
             if len(waveforms) > 1 and len(set(lengths.tolist())) != 1:
                 raise ValueError("Variable-length audio requires padding.")

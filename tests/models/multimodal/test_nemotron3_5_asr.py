@@ -83,12 +83,22 @@ def test_nemotron_audio_encoder_uses_configured_activation() -> None:
     assert isinstance(layer.conv.activation, torch.nn.ReLU)
 
 
-def test_nemotron_audio_encoder_preserves_batch_and_valid_lengths() -> None:
+@pytest.mark.parametrize(
+    ("num_mel_frames", "physical_frames", "valid_frames"),
+    [(26, 5, 4), (128, 17, 17)],
+)
+def test_nemotron_audio_encoder_preserves_batch_and_valid_lengths(
+    num_mel_frames: int,
+    physical_frames: int,
+    valid_frames: int,
+) -> None:
     torch.manual_seed(0)
-    model = Nemotron3_5AsrAudioEncoder(_get_tiny_config()).eval()
-    input_features = torch.randn(2, 26, 8)
-    attention_mask = torch.zeros(2, 26, dtype=torch.bool)
-    attention_mask[0, :25] = True
+    config = _get_tiny_config()
+    config.encoder_config.num_hidden_layers = 2
+    model = Nemotron3_5AsrAudioEncoder(config).eval()
+    input_features = torch.randn(2, num_mel_frames, 8)
+    attention_mask = torch.zeros(2, num_mel_frames, dtype=torch.bool)
+    attention_mask[0, : num_mel_frames - 1] = True
     attention_mask[1, :17] = True
 
     with torch.inference_mode():
@@ -103,9 +113,9 @@ def test_nemotron_audio_encoder_preserves_batch_and_valid_lengths() -> None:
             prompt_ids=torch.tensor([3]),
         )
 
-    assert output.shape == (2, 5, 8)
+    assert output.shape == (2, physical_frames, 8)
     assert output_mask is not None
-    assert output_mask.sum(-1).tolist() == [4, 3]
+    assert output_mask.sum(-1).tolist() == [valid_frames, 3]
     assert torch.isfinite(output).all()
     assert unpadded_mask is not None
     assert unpadded_mask.sum().item() == 3

@@ -515,6 +515,8 @@ class NemotronAsrStreamingAttention(nn.Module):
             attention_scores.masked_fill_(~attention_mask, float("-inf"))
 
         probabilities = F.softmax(attention_scores, dim=-1, dtype=torch.float32)
+        if attention_mask is not None:
+            probabilities = probabilities.masked_fill(~attention_mask, 0.0)
         probabilities = probabilities.to(query.dtype)
         probabilities = F.dropout(
             probabilities,

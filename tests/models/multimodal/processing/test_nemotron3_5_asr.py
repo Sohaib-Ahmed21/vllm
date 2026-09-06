@@ -258,6 +258,36 @@ def test_nemotron_feature_extractor_rejects_wrong_sampling_rate() -> None:
         )
 
 
+@pytest.mark.parametrize("truncation", [False, True])
+def test_nemotron_feature_extractor_max_length_requires_truncation(
+    truncation: bool,
+) -> None:
+    extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
+    audio = np.random.default_rng(0).standard_normal(4040).astype(np.float32)
+    output = extractor(
+        audio,
+        sampling_rate=16000,
+        padding="max_length",
+        max_length=1600,
+        truncation=truncation,
+    )
+    expected = extractor(
+        audio[:1600] if truncation else audio,
+        sampling_rate=16000,
+    )
+    torch.testing.assert_close(output["input_features"], expected["input_features"])
+    torch.testing.assert_close(output["attention_mask"], expected["attention_mask"])
+
+
+def test_nemotron_feature_extractor_accepts_flat_audio_list() -> None:
+    extractor = NemotronAsrStreamingFeatureExtractor(feature_size=128)
+    audio = np.random.default_rng(0).standard_normal(1600).astype(np.float32)
+    output = extractor(audio.tolist(), sampling_rate=16000)
+    expected = extractor(audio, sampling_rate=16000)
+    torch.testing.assert_close(output["input_features"], expected["input_features"])
+    torch.testing.assert_close(output["attention_mask"], expected["attention_mask"])
+
+
 def test_nemotron_processor_builds_real_audio_batch() -> None:
     processor = Nemotron3_5AsrProcessor(
         NemotronAsrStreamingFeatureExtractor(feature_size=128),
